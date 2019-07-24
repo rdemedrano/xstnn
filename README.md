@@ -1,8 +1,4 @@
-# Spatio-Temporal Neural Networks for Space-Time Series Forecasting and Relation Discovery
-
-ICDM 2018 - IEEE International Conference on Data Mining series (ICDM)
-
-[Paper](https://ieeexplore.ieee.org/document/8215543/)
+# A Spatio-Temporal Neural Network Approach for Traffic Accident Forecasting
 
 Commands for reproducing synthetic experiments:
 
