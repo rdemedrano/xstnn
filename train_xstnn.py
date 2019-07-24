@@ -24,17 +24,17 @@ from xstnn import xSpatioTemporalNN
 p = configargparse.ArgParser()
 # -- data
 p.add('--datadir', type=str, help='path to dataset', default='data')
-p.add('--dataset', type=str, help='dataset name', default='crash_ex')
+p.add('--dataset', type=str, help='dataset name', default='crash')
 # -- xp
 p.add('--outputdir', type=str, help='path to save xp', default='output')
-p.add('--xp', type=str, help='xp name', default='stnn')
+p.add('--xp', type=str, help='xp name', default='xstnn')
 # -- model
-p.add('--mode', type=str, help='STNN mode (default|refine|discover)', default='default')
-p.add('--nz', type=int, help='laten factors size', default=2)
+p.add('--mode', type=str, help='XSTNN mode (default|refine|discover)', default='default')
+p.add('--nz', type=int, help='laten factors size', default=1)
 p.add('--activation', type=str, help='dynamic module activation function (identity|tanh)', default='identity')
 p.add('--khop', type=int, help='spatial depedencies order', default=1)
-p.add('--nhid', type=int, help='dynamic function hidden size', default=3)
-p.add('--nlayers', type=int, help='dynamic function num layers', default=3)
+p.add('--nhid', type=int, help='dynamic function hidden size', default=0)
+p.add('--nlayers', type=int, help='dynamic function num layers', default=1)
 p.add('--dropout_f', type=float, help='latent factors dropout', default=.0)
 p.add('--dropout_d', type=float, help='dynamic function dropout', default=.0)
 p.add('--lambd', type=float, help='lambda between reconstruction and dynamic losses', default=.1)
@@ -79,8 +79,6 @@ if opt.device > -1:
 # Data
 #######################################################################################################################
 # -- load data
-# Se cargan los datos y se vuelcan en tensores. Todavía no tengo muy claro para que sirve el asunto del to(device)
-# pero me parece que es un asunto meramente técnico. Yo al menos no veo diferencias.   
 setup, (train_data, test_data), relations, (exogenous_train, exogenous_test) = dataset_factory(opt.datadir, opt.dataset, opt.khop)
 train_data = train_data.to(device)
 test_data = test_data.to(device)
@@ -90,18 +88,13 @@ relations = relations.to(device)
 for k, v in setup.items():
     opt[k] = v
 
-# -- train inputs
-# Esto devuelve tensores con los índices temporales y espaciales. Es decir, en el tiempo tantos 0s como espacios haya
-# en la primera fila, luego tantos 1s y así. Mientras que en x_idx devuelve tantas filas como tiempos haya, y todas
-# las filas son una secuencia de 0 a nx.    
+# -- train inputs  
 t_idx = torch.arange(opt.nt_train, out=torch.LongTensor()).unsqueeze(1).expand(opt.nt_train, opt.nx).contiguous()
 x_idx = torch.arange(opt.nx, out=torch.LongTensor()).expand_as(t_idx).contiguous()
 # dynamic
-# Esto devuelve un tensor de [2, (nt-1)*nx], que es como repetir las zonas espaciales para cada tiempo.
 idx_dyn = torch.stack((t_idx[1:], x_idx[1:])).view(2, -1).to(device)
 nex_dyn = idx_dyn.size(1)
 # decoder
-# Igual que el anterior pero de [2, nt*nx]
 idx_dec = torch.stack((t_idx, x_idx)).view(2, -1).to(device)
 nex_dec = idx_dec.size(1)
 
@@ -142,29 +135,18 @@ for e in pb:
     # ------------------------ Train ------------------------
     model.train()
     # --- decoder ---
-    # Se reparten aleatoriamente los nt*nx casos de entreno
     idx_perm = torch.randperm(nex_dec).to(device)
-    # Se parten en el número de batches que se quiera (cada batch es de tamaño batch_size). No se repetirán los casos, aunque
-    # luego en input_t e input_x veas repetidos tienes que pensar que por cada tiempo hay nx espacios y así. De ahí que sea
-    # una lista de nt*nx casos.
     batches = idx_perm.split(opt.batch_size)
     logs_train = defaultdict(float)
-    # Se realiza el proceso para cada batch, optimizando parámetros en cada paso (se optimizan para una tirada completa de más
-    # de un caso. Es decir, cada batch es un conjunto de muchos índices, no se optimiza uno a uno)
-    # Es decir, batch_size nos dice cada cuantos ejemplos de entreno se optimizan parámetros.
     for i, batch in enumerate(batches):
         optimizer.zero_grad()
         # data
-        # Estos dan números que serán los índices
         input_t = idx_dec[0][batch]
         input_x = idx_dec[1][batch]
-        # Esto da el valor concreto de train data en esa posición (comprobado)
         x_target = train_data[input_t, input_x]
         # closure
-        # Se hace la decodificación del valor y se comprueba como de lejos está con el esperado.
         x_rec = model.dec_closure(input_t, input_x)
         mse_dec = F.mse_loss(x_rec, x_target)
-        # Ahora se hace la optimización del gradiente
         # backward
         mse_dec.backward()
         # step
@@ -173,8 +155,6 @@ for e in pb:
         logger.log('train_iter.mse_dec', mse_dec.item())
         logs_train['mse_dec'] += mse_dec.item() * len(batch)
     # --- dynamic ---
-    # Funciona básicamente igual que el anterior. Una vez hecho, se ha entrenado entero el dataset una vez y se termina una
-    # época.
     idx_perm = torch.randperm(nex_dyn).to(device)
     batches = idx_perm.split(opt.batch_size)
     for i, batch in enumerate(batches):
@@ -191,16 +171,12 @@ for e in pb:
         if opt.l2_z > 0:
             loss_dyn += opt.l2_z * model.factors[input_t - 1, input_x].sub(model.factors[input_t, input_x]).pow(2).mean()
         if opt.mode in('refine', 'discover') and opt.l1_rel > 0:
-            # rel_weights_tmp = model.rel_weights.data.clone()
+            rel_weights_tmp = model.rel_weights.data.clone()
             loss_dyn += opt.l1_rel * model.get_relations().abs().mean()
         # backward
         loss_dyn.backward()
         # step
         optimizer.step()
-        # clip
-        # if opt.mode == 'discover' and opt.l1_rel > 0:  # clip
-        #     sign_changed = rel_weights_tmp.sign().ne(model.rel_weights.data.sign())
-        #     model.rel_weights.data.masked_fill_(sign_changed, 0)
         # log
         logger.log('train_iter.mse_dyn', mse_dyn.item())
         logs_train['mse_dyn'] += mse_dyn.item() * len(batch)

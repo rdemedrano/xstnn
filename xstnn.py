@@ -19,20 +19,8 @@ class xSpatioTemporalNN(nn.Module):
         self.nz = nz
         self.mode = mode
         self.exogenous = exogenous
-        # kernel
-        # Creo que la activación está bastante clara.
         self.activation = torch.tanh if activation == 'tanh' else identity if activation == 'identity' else None
         device = relations.device
-        # A la hora de obtener las relaciones hay dos posibilidades: que estemos en modo de descubrirlas, o en normal-refinarlas
-        # En este segundo caso simplemente se utiliza el relations conocido
-        # Téngase en cuenta que torch.cat concatena vectores en cierta dimensión, torch.eye devuelve un tensor 2D diagonal de
-        # 1s de número de filas nx, unsqeeeze(1) devuelve un tensor (no tengo muy claro que hace).
-        # En definitiva, torch.eye(nx).to(device).unsqueeze(1) saca un tensor diagonal de dimensiones [nx, 1, nx], y el cat con
-        # el relations genera un tensor raruno de [nx, 2, nx]. Por la pinta que tiene, es como que primero va una lista que marca
-        # la posición espacial (tiene un 1 en la posición que estés mirando, es decir tiene un 1 en la posisición 4 si haces
-        # relation[4] por ejemplo), y luego va otra lista que es la fila de relations original que corresponda. Entiendo que
-        # necesariamente serán listas de filas siempre y que dependerá de la dimensionalidad, pero así se ve claro.
-        # Si estás en discover generas algo similar pero lleno de unos la lista que da los valores (no las posiciones).
         if mode is None or mode == 'refine':
             self.relations = torch.cat((torch.eye(nx).to(device).unsqueeze(1), relations), 1)
         elif mode == 'discover':
@@ -40,27 +28,9 @@ class xSpatioTemporalNN(nn.Module):
                                         torch.ones(nx, 1, nx).to(device)), 1)
         self.nr = self.relations.size(1)
         # modules
-        # Como linear, defines la función drop que hará 0 elementos del tensor que pases como parámetros con probabilidad
-        # dropout_f
-        self.drop = nn.Dropout(dropout_f)
-        # Se recuerda que las ns hacen referencia al tamaño de los espacios temporales, espaciales y latente.
-        # Este último es por defecto 1.   
-        # Me da que torch.Tensor inicializa un tensor de cero, más bien números muy grandes o muy pequeños. NO importa,
-        # porque en _init_weights los inicializas entre -0.1 y +0.1, o lo que toque. Es decir, creo que son los "pesos" o 
-        # o valores de z.
-        # Parameter simplementes es una forma de definir un tensor con parámetros en pytorch, que dentro de un nn.Module
-        # (como lo que tenemos) automáticamente funciona como parámetros.        
+        self.drop = nn.Dropout(dropout_f)   
         self.factors = nn.Parameter(torch.Tensor(nt, nx, nz))
-        # En este caso la función dinámica es nada más y nada menos que un MLP, que en el caso sencillo es solo una transfor
-        # mación lienal, tal y como comenta en el paper.
-        # Lo único es que esta vez la entrada es de más de una variable, dependiendo de nz y nr. La salida sigue siendo nz.
-#        self.dynamic = MLP(nz * self.nr + np * 2, nhid, nz, nlayers, dropout_d)
-        self.dynamic = MLP(nz * self.nr + np * 4, nhid, nz, nlayers, dropout_d)
-        # El famoso decoder. En el paper no se aportan expresiones para él, por lo que no tengo muy claro porque se ha decido
-        # por este en concreto. 
-        # En cualquier caso, nn.Linear aplica una transformación lineal de un espacio de nz dimensiones a otro de nd. Funciona
-        # como una función, es decir aquí estamos definiendo decoder como un transformador lineal de nz a nd.
-        # Por ejemplo con el factors creado, si haces decoder(factors[-1]) devuelve un tensor de 49x49 (espacio real)
+        self.dynamic = MLP(nz * self.nr + np * 2, nhid, nz, nlayers, dropout_d)
         self.decoder = nn.Linear(nz, nd, bias=False)
         if mode == 'refine':
             self.relations.data = self.relations.data.ceil().clamp(0, 1).byte()
@@ -99,192 +69,78 @@ class xSpatioTemporalNN(nn.Module):
                 intra = self.relations[:, 0].unsqueeze(1)
                 inter = weights
             return torch.cat((intra, inter), 1)
-        
+
     def update_z(self, z, exogenous_var):
         """
-        Dado un conjunto de Zs, calcula Zt+1. Presupone la existencia
-        de una función dinámica ya entrenada, y de la entrada de variables exógenas
-        en diversos rangos temporales.
-        MÁS DE UN RANGO TEMPORAL
-        :param z: el valor de las variables en el espacio latente
-        :return Zt+1: el valor que toma el espacio latente en el siguiente tiempo
+        Given a set of Zs, computes Zt+1.
+        :param z: latent space
+        :return Zt+1: latent space in the next timestep
         """
         z_context = self.get_relations().matmul(z).view(-1, self.nr * self.nz)
         if self.np != 0:
-            exo_context_0 = self.get_relations().matmul(exogenous_var[:,0]).view(-1, self.nr * self.np)
-            exo_context_1 = self.get_relations().matmul(exogenous_var[:,1]).view(-1, self.nr * self.np)
-            z_cat = torch.cat((z_context, exo_context_0, exo_context_1),1)
-#          z_next = self.dynamic(z_context)
+            exo_context = self.get_relations().matmul(exogenous_var).view(-1, self.nr * self.np)
+            z_cat = torch.cat((z_context, exo_context),1)
             z_next = self.dynamic(z_cat)
             return self.activation(z_next)
         else:
             z_next = self.dynamic(z_context)
-            return self.activation(z_next)   
-
-#    def update_z(self, z, exogenous_var):
-#        """
-#        Dado un conjunto de Zs, calcula Zt+1. Presupone la existencia
-#        de una función dinámica ya entrenada.
-#        :param z: el valor de las variables en el espacio latente
-#        :return Zt+1: el valor que toma el espacio latente en el siguiente tiempo
-#        """
-#        z_context = self.get_relations().matmul(z).view(-1, self.nr * self.nz)
-#        if self.np != 0:
-#            exo_context = self.get_relations().matmul(exogenous_var).view(-1, self.nr * self.np)
-#            z_cat = torch.cat((z_context, exo_context),1)
-##          z_next = self.dynamic(z_context)
-#            z_next = self.dynamic(z_cat)
-#            return self.activation(z_next)
-#        else:
-#            z_next = self.dynamic(z_context)
-#            return self.activation(z_next)
+            return self.activation(z_next)
              
 
     def decode_z(self, z):
         """
-        Dado un conjunto de Zs, hace la decodificación. Presupone la existencia
-        de un decodificador ya entrenado.
-        :param z: el valor de las variables en el espacio latente
-        :return x_rec: el valor que toma la salida en el espacio real
+        Decoding of the latent space.
+        :param z: latent space
+        :return x_rec: output in the real space
         """
         x_rec = self.decoder(z)
         return x_rec
 
     def dec_closure(self, t_idx, x_idx):
         """
-        "Entrenamiento" del decodificador (d en el paper). Realmente no existe un entrenamiento
-        :param t_idx: índice de la serie temporal
-        :param x_idx: índice de la serie espacial
+        Decoder function.
+        :param t_idx: time series index
+        :param x_idx: spatial zone index
         """
-        # Esto básicamente coge un elemento concreto de factors (ún número, lista o lo que sea. Una fila entera, según la
-        # dimensión de nz), y hace con cierta probabilidad 0 componentes suyos con drop.
         z_inf = self.drop(self.factors[t_idx, x_idx])
-        # Ahora es cuando hace la parte del decoder (linear)
         x_rec = self.decoder(z_inf)
         return x_rec
 
-    
+        
     def dyn_closure(self, t_idx, x_idx):
         """
-        "Entrenamiento" de la función dinámica (g en el paper). Realmente no existe un entrenamiento.
-        MÁS DE UN RANGO TEMPORAL
-        :param t_idx: índices de la serie temporal
-        :param x_idx: índices de la serie en sí
+        Dynamic function.
+        :param t_idx: time series index
+        :param x_idx: spatial zone index
         """
-        # Se obtienen las relaciones.
         rels = self.get_relations()
-        # Y los factors que toquen, con la posibilidad de ponerlos a 0.
         z_input = self.drop(self.factors[t_idx])
-        # matmul es un producto matricial de tensores (se puede poner como torch.matmul(tensor, tensor2) o como tensor1.matmul(tensor2))
-        # view devuelve un tensor con las mismas componentes que el inicial, pero con diferente shape. En este caso, pasa de
-        # columna a fila. Para hacerlos una idea, es como que saca una fila de dos elementos, uno con la Z anterior y otro 
-        # con el producto escalar de la fila de W que toque con las Z anteriores para su uso en la ecuación (4). Si Z tiene más
-        # dimensión que uno, pues serán más componentes.
         z_context = rels[x_idx].matmul(z_input).view(-1, self.nr * self.nz)
         if self.np != 0:
-#            perm = torch.LongTensor([torch.Tensor.numpy(t_idx + 1), torch.Tensor.numpy(x_idx)])
-#            exo = self.exogenous[perm[0], perm[1]] SIN W EN EXOGENAS
-#            exo = self.exogenous[perm[0]]
-            exo_input_1 = self.exogenous[t_idx+1]
-            exo_input_0 = self.exogenous[t_idx]
-            exo_context_1 = rels[x_idx].matmul(exo_input_1).view(-1, self.nr * self.np)
-            exo_context_0 = rels[x_idx].matmul(exo_input_0).view(-1, self.nr * self.np)
-            z_cat = torch.cat((z_context, exo_context_0, exo_context_1),1)
+            exo_input = self.exogenous[t_idx+1]
+            exo_context = rels[x_idx].matmul(exo_input).view(-1, self.nr * self.np)
+            z_cat = torch.cat((z_context, exo_context),1)
             z_gen = self.dynamic(z_cat)
             return self.activation(z_gen)
         else:
             z_gen = self.dynamic(z_context)
             return self.activation(z_gen)
         
-#        def dyn_closure(self, t_idx, x_idx):
-#        """
-#        "Entrenamiento" de la función dinámica (g en el paper). Realmente no existe un entrenamiento
-#        :param t_idx: índices de la serie temporal
-#        :param x_idx: índices de la serie en sí
-#        """
-#        # Se obtienen las relaciones.
-#        rels = self.get_relations()
-#        # Y los factors que toquen, con la posibilidad de ponerlos a 0.
-#        z_input = self.drop(self.factors[t_idx])
-#        # matmul es un producto matricial de tensores (se puede poner como torch.matmul(tensor, tensor2) o como tensor1.matmul(tensor2))
-#        # view devuelve un tensor con las mismas componentes que el inicial, pero con diferente shape. En este caso, pasa de
-#        # columna a fila. Para hacerlos una idea, es como que saca una fila de dos elementos, uno con la Z anterior y otro 
-#        # con el producto escalar de la fila de W que toque con las Z anteriores para su uso en la ecuación (4). Si Z tiene más
-#        # dimensión que uno, pues serán más componentes.
-#        z_context = rels[x_idx].matmul(z_input).view(-1, self.nr * self.nz)
-#        if self.np != 0:
-##            perm = torch.LongTensor([torch.Tensor.numpy(t_idx + 1), torch.Tensor.numpy(x_idx)])
-##            exo = self.exogenous[perm[0], perm[1]] SIN W EN EXOGENAS
-##            exo = self.exogenous[perm[0]]
-#            exo_input = self.exogenous[t_idx+1]
-#            exo_context = rels[x_idx].matmul(exo_input).view(-1, self.nr * self.np)
-#            z_cat = torch.cat((z_context, exo_context),1)
-#            z_gen = self.dynamic(z_cat)
-#            return self.activation(z_gen)
-#        else:
-#            z_gen = self.dynamic(z_context)
-#            return self.activation(z_gen)
-        
         
     def generate(self, nsteps, validation_exo):
         """
-        Función que genera una salida para la variable de estudio y para la función
-        Z del latent space. Lo hace para un número nsteps de pasos.
-        MÁS DE UN RANGO TEMPORAL
-        :param nsteps: número de pasos temporales para los cuales se calculan las variables
+        Generating new values in the series.
+        :param nsteps: number of timesteps to forecast
+        :param validation_exo: exogenous variables for the prediction
         """
-        # Se coge el valor de z del último de los ejemplos de entrenamiento parece ser (todo esto suponiendo que factors es
-        # lo que estoy suponiendo que es). A partir de él se calcularán el primero nuevo, a partir de este el segundo, y así.        
         z = self.factors[-1]
-        ex = self.exogenous[-1]
         z_gen = []
         for t in range(nsteps):
-            z = self.update_z(z, torch.cat((ex, validation_exo[t]), 1))
-            ex = validation_exo[t]
+            z = self.update_z(z, validation_exo[t])
             z_gen.append(z)
-#        CON Zt+1 - LAMBDAt
-#        for t in range(nsteps):
-#            if t == 0:
-#                z = self.update_z(z, ex)
-#            else:
-#                z = self.update_z(z, validation_exo[t-1])
-#            z_gen.append(z)
-        # Concatenación de tensores. Es decir, z_gen es una lista de tensores (cada update_z da uno), aquí se genera un único
-        # tensor largo.
-        # Prueba por ejemplo: torch.stack([torch.tensor([[1,2],[3,4]]), torch.tensor([[5,6],[7,8]])])
         z_gen = torch.stack(z_gen)
-        # Esto simplemente calcula las xs para esos valores de z.
         x_gen = self.decode_z(z_gen)
-        return x_gen, z_gen    
-        
-#    def generate(self, nsteps, validation_exo):
-#        """
-#        Función que genera una salida para la variable de estudio y para la función
-#        Z del latent space. Lo hace para un número nsteps de pasos.
-#        :param nsteps: número de pasos temporales para los cuales se calculan las variables
-#        """
-#        # Se coge el valor de z del último de los ejemplos de entrenamiento parece ser (todo esto suponiendo que factors es
-#        # lo que estoy suponiendo que es). A partir de él se calcularán el primero nuevo, a partir de este el segundo, y así.        
-#        z = self.factors[-1]
-##        ex = self.exogenous[-1]
-#        z_gen = []
-#        for t in range(nsteps):
-#            z = self.update_z(z, validation_exo[t])
-#            z_gen.append(z)
-##        CON Zt+1 - LAMBDAt
-##        for t in range(nsteps):
-##            if t == 0:
-##                z = self.update_z(z, ex)
-##            else:
-##                z = self.update_z(z, validation_exo[t-1])
-##            z_gen.append(z)
-#        # Concatenación de tensores. Es decir, z_gen es una lista de tensores (cada update_z da uno), aquí se genera un único
-#        # tensor largo.
-#        # Prueba por ejemplo: torch.stack([torch.tensor([[1,2],[3,4]]), torch.tensor([[5,6],[7,8]])])
-#        z_gen = torch.stack(z_gen)
-#        # Esto simplemente calcula las xs para esos valores de z.
-#        x_gen = self.decode_z(z_gen)
-#        return x_gen, z_gen
+        return x_gen, z_gen
 
     def factors_parameters(self):
         yield self.factors

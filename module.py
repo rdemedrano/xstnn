@@ -9,7 +9,6 @@ class MLP(nn.Module):
         if nlayers == 1:
             self.module = nn.Linear(ninp, nout)
         else:
-            # Requiere que nhid sea mayor que 0
             modules = [nn.Linear(ninp, nhid), nn.ReLU(), nn.Dropout(dropout)]
             nlayers -= 1
             while nlayers > 1:
