@@ -1,4 +1,4 @@
-# A Spatio-Temporal Neural Network Approach for Traffic Accident Forecasting
+# A New Spatio-Temporal Neural Network Approach for Traffic Accident Forecasting
 
 In Traffic accidents.ipynb there is an example of use for this network in the traffic accidents forecasting problem.
 Commands for reproducing jupyter experiments in console:
